@@ -1,0 +1,76 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+use lib qw( lib extlib );
+use lib qw( ../lib ../extlib );
+
+use Getopt::Long;
+use Parallel::Prefork;
+
+use MT::TheSchwartz;
+use MT::Object;
+use MT::ObjectDriverFactory;
+use MT::Bootstrap;
+use MT;
+
+my $sleep = 1;
+my $disable_workers;
+my $disable_tasks;
+my $max_processes = 1;
+
+Getopt::Long::GetOptions(
+    "sleep=i"           => \$sleep,
+    "disable_workers=i" => \$disable_workers,
+    "disable_tasks=i"   => \$disable_tasks,
+    "max_processes=i"   => \$max_processes,
+);
+
+if ( $disable_workers && $disable_tasks ) {
+    die "You cannot set up disable_workers and disable_tasks simultaneously.\n";
+}
+
+my $pm = Parallel::Prefork->new({
+    max_workers  => $max_processes,
+    trap_signals => {
+        TERM => 'TERM',
+        HUP  => 'TERM',
+        USR1 => undef,
+    },
+});
+
+while ($pm->signal_received ne 'TERM') {
+    $pm->start and next;
+
+    my $mt = MT->new;
+    if ( !$mt ) {
+        die MT->errstr;
+    }
+
+    $mt->{vtbl}                 = {};
+    $mt->{is_admin}             = 0;
+    $mt->{template_dir}         = 'cms';
+    $mt->{user_class}           = 'MT::Author';
+    $mt->{plugin_template_path} = 'tmpl';
+    $mt->run_callbacks( 'init_app', $mt );
+
+    my $client = eval { MT::TheSchwartz->new( prioritize => 1 ) };
+    if ( $client ) {
+        if ( $disable_workers ) {
+            no warnings 'once';
+            local *MT::TheSchwartz::work_once = sub { 0 };
+            $client->work_periodically( $sleep );
+        } elsif ( $disable_tasks ) {
+            no warnings 'once';
+            local *MT::run_tasks = sub { 0 };
+            $client->work_periodically( $sleep );
+        } else {
+            $client->work_periodically( $sleep );
+        }
+    }
+
+    $pm->finish;
+}
+
+$pm->wait_all_children;
+
